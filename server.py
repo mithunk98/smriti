@@ -33,6 +33,13 @@ def _redact(msg: str) -> str:
 
 @contextmanager
 def db():
+    # A non-URL value is parsed as key=value text and its errors quote raw fragments
+    # (possibly the password), so reject it before connecting.
+    if not DATABASE_URL.strip().startswith(("postgresql://", "postgres://")):
+        raise ToolError(
+            "Database error: DATABASE_URL on the server does not start with postgresql:// . "
+            "Paste the full Session pooler connection string as the value (no quotes or spaces)."
+        )
     try:
         with psycopg.connect(DATABASE_URL, autocommit=True) as conn:
             yield conn
