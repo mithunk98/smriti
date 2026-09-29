@@ -110,8 +110,9 @@ def remember(text: str, tags: str = "") -> str:
 
 
 @mcp.tool()
-def recall(query: str, limit: int = 10) -> str:
+def recall(query: str, limit: int = 5) -> str:
     """Search long-term memory. Use before answering anything about the user's past, plans or preferences."""
+    note = ""
     with db() as conn:
         if VOYAGE_API_KEY:
             _backfill(conn)
@@ -119,36 +120,41 @@ def recall(query: str, limit: int = 10) -> str:
             if q:
                 v = _vec(q[0])
                 rows = conn.execute(
-                    """SELECT created_at::date, text, tags FROM memories
+                    """SELECT created_at::date AS day, text, tags, 1 - (embedding <=> %s::vector) AS score
+                       FROM memories
                        WHERE embedding IS NOT NULL AND vector_dims(embedding) = vector_dims(%s::vector)
-                       ORDER BY embedding <=> %s::vector, created_at DESC
+                       ORDER BY score DESC, created_at DESC
                        LIMIT %s""",
                     (v, v, limit),
                 ).fetchall()
                 if rows:
-                    return "Closest memories by meaning (best first):\n" + _fmt(rows)
+                    return "Closest memories by meaning (best first; ignore weak matches):\n" + "\n".join(
+                        f"(match {score:.2f}) " + _fmt([(d, t, g)]) for d, t, g, score in rows
+                    )
+            else:
+                note = "(Search by meaning is unavailable right now, e.g. rate-limited; keyword results below.)\n"
 
         rows = conn.execute(
             """WITH q AS (  -- match ANY word, best matches first
                  SELECT to_tsquery('english', replace(plainto_tsquery('english', %s)::text, '&', '|')) AS q)
-               SELECT created_at::date, text, tags FROM memories, q
+               SELECT created_at::date AS day, text, tags FROM memories, q
                WHERE search @@ q.q
                ORDER BY ts_rank(search, q.q) DESC, created_at DESC
                LIMIT %s""",
             (query, limit),
         ).fetchall()
         if rows:
-            return _fmt(rows)
+            return note + _fmt(rows)
 
         # Keyword search misses paraphrases ("build" vs "built"), so give Claude the
         # latest memories to reason over instead of nothing.
         rows = conn.execute(
-            "SELECT created_at::date, text, tags FROM memories ORDER BY created_at DESC LIMIT %s",
+            "SELECT created_at::date AS day, text, tags FROM memories ORDER BY created_at DESC LIMIT %s",
             (limit,),
         ).fetchall()
     if not rows:
         return "Memory is empty."
-    return "No keyword match. Most recent memories:\n" + _fmt(rows)
+    return note + "No keyword match. Most recent memories (newest first):\n" + _fmt(rows)
 
 
 @mcp.tool()
@@ -156,7 +162,7 @@ def recent(days: int = 7) -> str:
     """List everything remembered in the last N days (good for weekly reviews)."""
     with db() as conn:
         rows = conn.execute(
-            "SELECT created_at::date, text FROM memories WHERE created_at > now() - make_interval(days => %s) ORDER BY created_at",
+            "SELECT created_at::date AS day, text FROM memories WHERE created_at > now() - make_interval(days => %s) ORDER BY created_at",
             (days,),
         ).fetchall()
     return "\n".join(f"[{d}] {t}" for d, t in rows) or "Nothing in that period."
