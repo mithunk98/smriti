@@ -414,6 +414,7 @@ BOT_HELP = """Hi! I'm Smriti. Commands:
 /recent 7: memories from the last N days
 /forget 9: delete memory #9
 /brief: today's brief"""
+BOT_TIP = "\n\nTip: tap a command in the / menu and I'll ask for the details."
 
 
 def _parse_day(word: str, today: date) -> date | None:
@@ -432,16 +433,34 @@ def _parse_day(word: str, today: date) -> date | None:
         return None
 
 
+# Tapping a command in Telegram's "/" menu sends it at once with no text, so the bot
+# asks for the rest and treats the next plain message as the command's argument.
+ASK_FOR = {
+    "/task": "What's the task? Add a due day at the end, e.g. Submit lab record sunday",
+    "/remember": "What should I remember?",
+    "/recall": "What should I search for?",
+    "/done": "Which task number is done?",
+    "/forget": "Which memory number should I delete? (/recent shows the numbers)",
+}
+_pending_cmd: str | None = None
+
+
 def _handle_bot_message(text: str) -> str:
-    cmd, _, arg = text.strip().partition(" ")
+    global _pending_cmd
+    text = text.strip()
+    if _pending_cmd and not text.startswith("/"):
+        text = f"{_pending_cmd} {text}"
+    _pending_cmd = None
+    cmd, _, arg = text.partition(" ")
     cmd = cmd.lower().split("@")[0]  # "/tasks@my_bot" form
     arg = arg.strip()
     try:
         if cmd in ("/start", "/help"):
-            return BOT_HELP
+            return BOT_HELP + BOT_TIP
+        if cmd in ASK_FOR and not arg:
+            _pending_cmd = cmd
+            return ASK_FOR[cmd] + ("\n\n" + list_tasks() if cmd == "/done" else "")
         if cmd == "/task":
-            if not arg:
-                return "Usage: /task Submit lab record sunday"
             words = arg.split()
             due = _parse_day(words[-1], _today()) if len(words) > 1 else None
             if due:
@@ -457,9 +476,9 @@ def _handle_bot_message(text: str) -> str:
             n = int(arg.lstrip("#"))
             return complete_task(n) if cmd == "/done" else forget(n)
         if cmd == "/remember":
-            return remember(arg) if arg else "Usage: /remember Prof said the exam covers chapters 1-6"
+            return remember(arg)
         if cmd == "/recall":
-            return recall(arg) if arg else "Usage: /recall exam syllabus"
+            return recall(arg)
         if cmd == "/recent":
             return recent(int(arg) if arg.isdigit() else 7)
         if cmd == "/brief":
