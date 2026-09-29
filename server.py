@@ -330,16 +330,19 @@ def _build_brief(conn, today: date) -> str:
     return "\n\n".join(parts)
 
 
-def _send_telegram(text: str) -> None:
+def _telegram(method: str, payload: dict, timeout: float = 20):
+    """Call the Telegram Bot API and return its result; errors never contain the bot token."""
     req = urllib.request.Request(
-        f"{TELEGRAM_URL}/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
-        data=json.dumps({"chat_id": TELEGRAM_CHAT_ID, "text": text}).encode(),
+        f"{TELEGRAM_URL}/bot{TELEGRAM_BOT_TOKEN}/{method}",
+        data=json.dumps(payload).encode(),
         headers={"Content-Type": "application/json"},
     )
     try:
-        with urllib.request.urlopen(req, timeout=20) as resp:
-            if not json.load(resp).get("ok"):
-                raise RuntimeError("Telegram did not accept the message")
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            body = json.load(resp)
+        if not body.get("ok"):
+            raise RuntimeError(f"Telegram did not accept the request: {body.get('description', '')}")
+        return body.get("result")
     except Exception as e:
         detail = str(e)
         if isinstance(e, urllib.error.HTTPError):
@@ -349,7 +352,11 @@ def _send_telegram(text: str) -> None:
             except Exception:
                 pass
         # Never let the bot token (part of the URL) reach logs or Claude.
-        raise RuntimeError(f"Telegram send failed: {detail.replace(TELEGRAM_BOT_TOKEN, '***')}") from None
+        raise RuntimeError(f"Telegram {method} failed: {detail.replace(TELEGRAM_BOT_TOKEN, '***')}") from None
+
+
+def _send_telegram(text: str) -> None:
+    _telegram("sendMessage", {"chat_id": TELEGRAM_CHAT_ID, "text": text[:4000]})
 
 
 @mcp.tool()
@@ -396,6 +403,102 @@ def _brief_scheduler() -> None:
         time.sleep(60)
 
 
+WEEKDAYS = ["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"]
+
+BOT_HELP = """Hi! I'm Smriti. Commands:
+/task Submit lab record sunday: add a task (due: today, tomorrow, a weekday or YYYY-MM-DD)
+/tasks: open tasks
+/done 4: mark task #4 done
+/remember Prof said chapters 1-6: save a memory
+/recall exam syllabus: search memories
+/recent 7: memories from the last N days
+/forget 9: delete memory #9
+/brief: today's brief"""
+
+
+def _parse_day(word: str, today: date) -> date | None:
+    """today / tomorrow / weekday (next one, never today) / YYYY-MM-DD, else None."""
+    w = word.lower().strip(".,")
+    if w == "today":
+        return today
+    if w in ("tomorrow", "tmrw"):
+        return today + timedelta(days=1)
+    for i, name in enumerate(WEEKDAYS):
+        if w in (name, name[:3]):
+            return today + timedelta(days=(i - today.weekday()) % 7 or 7)
+    try:
+        return date.fromisoformat(w)
+    except ValueError:
+        return None
+
+
+def _handle_bot_message(text: str) -> str:
+    cmd, _, arg = text.strip().partition(" ")
+    cmd = cmd.lower().split("@")[0]  # "/tasks@my_bot" form
+    arg = arg.strip()
+    try:
+        if cmd in ("/start", "/help"):
+            return BOT_HELP
+        if cmd == "/task":
+            if not arg:
+                return "Usage: /task Submit lab record sunday"
+            words = arg.split()
+            due = _parse_day(words[-1], _today()) if len(words) > 1 else None
+            if due:
+                words = words[:-1]
+                if len(words) > 1 and words[-1].lower() in ("by", "on", "due"):
+                    words = words[:-1]
+            return add_task(" ".join(words), due.isoformat() if due else "")
+        if cmd == "/tasks":
+            return list_tasks()
+        if cmd in ("/done", "/forget"):
+            if not arg.lstrip("#").isdigit():
+                return f"Usage: {cmd} 4 (the #id from {'/tasks' if cmd == '/done' else '/recall'})"
+            n = int(arg.lstrip("#"))
+            return complete_task(n) if cmd == "/done" else forget(n)
+        if cmd == "/remember":
+            return remember(arg) if arg else "Usage: /remember Prof said the exam covers chapters 1-6"
+        if cmd == "/recall":
+            return recall(arg) if arg else "Usage: /recall exam syllabus"
+        if cmd == "/recent":
+            return recent(int(arg) if arg.isdigit() else 7)
+        if cmd == "/brief":
+            return morning_brief()
+        return "I only understand commands for now (plain English and voice notes are coming).\n\n" + BOT_HELP
+    except ToolError as e:
+        return f"⚠️ {e}"
+    except Exception:
+        log.exception("Telegram command failed")
+        return "⚠️ Something went wrong on the server."
+
+
+def _telegram_bot() -> None:
+    """Long-poll Telegram and answer commands, but only from the owner's chat."""
+    try:  # the "/" command menu in the Telegram app
+        _telegram("setMyCommands", {"commands": [
+            {"command": c.split(" ")[0].lstrip("/"), "description": d.strip()}
+            for c, d in (line.split(": ", 1) for line in BOT_HELP.splitlines()[1:])
+        ]})
+    except Exception as e:
+        log.warning("Could not set the Telegram command menu: %s", e)
+    offset = None
+    while True:
+        try:
+            payload = {"timeout": 50, "allowed_updates": ["message"]}
+            if offset is not None:
+                payload["offset"] = offset
+            for update in _telegram("getUpdates", payload, timeout=65):
+                offset = update["update_id"] + 1
+                msg = update.get("message") or {}
+                if str(msg.get("chat", {}).get("id")) != TELEGRAM_CHAT_ID:
+                    continue  # a stranger found the bot: ignore
+                if msg.get("text"):
+                    _send_telegram(_handle_bot_message(msg["text"]))
+        except Exception as e:
+            log.warning("Telegram bot polling failed, retrying in 30 seconds: %s", e)
+            time.sleep(30)
+
+
 class BearerAuth:
     """Rejects any HTTP request that doesn't carry the secret token."""
 
@@ -417,3 +520,4 @@ app = BearerAuth(mcp.streamable_http_app(stateless_http=True, host="0.0.0.0"))
 
 if TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID and os.environ.get("SMRITI_SCHEDULER", "1") == "1":
     threading.Thread(target=_brief_scheduler, name="morning-brief", daemon=True).start()
+    threading.Thread(target=_telegram_bot, name="telegram-bot", daemon=True).start()

@@ -57,6 +57,8 @@ In the Supabase **SQL Editor**, run [`schema-tasks.sql`](schema-tasks.sql). Due 
 3. Open `https://api.telegram.org/bot<TOKEN>/getUpdates` in your browser and copy `"chat":{"id": ...}`.
 4. On Render add `TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID` (optional: `BRIEF_TIME`, default `07:30`).
 
+The same bot also answers commands from your chat only (messages from anyone else are ignored): `/task Submit lab record sunday`, `/tasks`, `/done 4`, `/remember ...`, `/recall ...`, `/recent`, `/forget 9`, `/brief`. Type `/` in the chat for the menu.
+
 The server sends the brief once a day at or after `BRIEF_TIME` (so a brief missed while it was down still goes out), and the `briefs` table prevents duplicates across restarts.
 
 ### 7. Connect Claude Code (on each laptop)
@@ -93,5 +95,8 @@ uvicorn server:app --port 8000
 - [x] Week 1: cloud memory (`remember` / `recall` / `recent`)
 - [x] Week 2: semantic search (pgvector + Voyage embeddings)
 - [x] Week 3: tasks with due dates
-- [ ] Later: calendar and Spotify focus playlists
+- [x] Telegram two-way: commands from your phone
+- [ ] Plain English + voice notes in Telegram
+- [ ] Google Calendar sync
+- [ ] Spotify focus playlists
 - [x] Week 4: morning brief on Telegram
