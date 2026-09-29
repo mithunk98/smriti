@@ -58,6 +58,8 @@ def db():
         hint = ""
         if DATABASE_URL.split("://", 1)[-1].count("@") > 1:
             hint = " Hint: the database password contains '@'; use a password with only letters and numbers."
+        elif isinstance(e, psycopg.errors.UndefinedColumn) and "embedding" in str(e):
+            hint = " Hint: run schema-semantic.sql in the Supabase SQL Editor to enable search by meaning."
         raise ToolError(f"Database error ({type(e).__name__}): {_redact(detail)}{hint}") from e
 
 
