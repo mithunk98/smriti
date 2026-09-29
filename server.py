@@ -1,5 +1,8 @@
+import json
+import logging
 import os
 import re
+import urllib.request
 from contextlib import contextmanager
 
 import psycopg
@@ -9,6 +12,12 @@ from starlette.responses import PlainTextResponse
 
 DATABASE_URL = os.environ["DATABASE_URL"]
 TOKEN = os.environ["SMRITI_TOKEN"]
+# Optional: with a Voyage AI key, recall searches by meaning instead of keywords.
+VOYAGE_API_KEY = os.environ.get("VOYAGE_API_KEY", "").strip()
+VOYAGE_MODEL = os.environ.get("VOYAGE_MODEL", "voyage-3.5-lite")
+VOYAGE_URL = "https://api.voyageai.com/v1/embeddings"
+
+log = logging.getLogger("smriti")
 
 mcp = MCPServer("smriti", instructions="Personal memory for the user. Save important facts, decisions and plans with remember; look things up with recall before answering personal questions.")
 
@@ -52,11 +61,49 @@ def db():
         raise ToolError(f"Database error ({type(e).__name__}): {_redact(detail)}{hint}") from e
 
 
+def _embed(texts: list[str], input_type: str) -> list[list[float]] | None:
+    """Embed texts with Voyage AI; None if disabled or the call fails (callers fall back)."""
+    if not VOYAGE_API_KEY or not texts:
+        return None
+    req = urllib.request.Request(
+        VOYAGE_URL,
+        data=json.dumps({"input": texts, "model": VOYAGE_MODEL, "input_type": input_type}).encode(),
+        headers={"Authorization": f"Bearer {VOYAGE_API_KEY}", "Content-Type": "application/json"},
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=20) as resp:
+            data = json.load(resp)["data"]
+        return [item["embedding"] for item in sorted(data, key=lambda item: item["index"])]
+    except Exception as e:
+        log.warning("Voyage embedding failed: %s", e)
+        return None
+
+
+def _vec(v: list[float]) -> str:
+    return "[" + ",".join(map(str, v)) + "]"
+
+
+def _backfill(conn, batch: int = 100) -> None:
+    """Embed memories saved without an embedding (older ones, or when Voyage was down)."""
+    rows = conn.execute(
+        "SELECT id, text, tags FROM memories WHERE embedding IS NULL ORDER BY id LIMIT %s", (batch,)
+    ).fetchall()
+    vectors = _embed([f"{t} {g}".strip() for _, t, g in rows], "document")
+    for (id_, _, _), v in zip(rows, vectors or []):
+        conn.execute("UPDATE memories SET embedding = %s::vector WHERE id = %s", (_vec(v), id_))
+
+
+def _fmt(rows) -> str:
+    return "\n".join(f"[{d}] {t}" + (f"  (tags: {g})" if g else "") for d, t, g in rows)
+
+
 @mcp.tool()
 def remember(text: str, tags: str = "") -> str:
     """Save a fact, decision, idea or note about the user's life to long-term memory."""
     with db() as conn:
         conn.execute("INSERT INTO memories (text, tags) VALUES (%s, %s)", (text, tags))
+        if VOYAGE_API_KEY:
+            _backfill(conn)
     return "Saved."
 
 
@@ -64,6 +111,21 @@ def remember(text: str, tags: str = "") -> str:
 def recall(query: str, limit: int = 10) -> str:
     """Search long-term memory. Use before answering anything about the user's past, plans or preferences."""
     with db() as conn:
+        if VOYAGE_API_KEY:
+            _backfill(conn)
+            q = _embed([query], "query")
+            if q:
+                v = _vec(q[0])
+                rows = conn.execute(
+                    """SELECT created_at::date, text, tags FROM memories
+                       WHERE embedding IS NOT NULL AND vector_dims(embedding) = vector_dims(%s::vector)
+                       ORDER BY embedding <=> %s::vector, created_at DESC
+                       LIMIT %s""",
+                    (v, v, limit),
+                ).fetchall()
+                if rows:
+                    return "Closest memories by meaning (best first):\n" + _fmt(rows)
+
         rows = conn.execute(
             """WITH q AS (  -- match ANY word, best matches first
                  SELECT to_tsquery('english', replace(plainto_tsquery('english', %s)::text, '&', '|')) AS q)
@@ -73,20 +135,18 @@ def recall(query: str, limit: int = 10) -> str:
                LIMIT %s""",
             (query, limit),
         ).fetchall()
-    if not rows:
+        if rows:
+            return _fmt(rows)
+
         # Keyword search misses paraphrases ("build" vs "built"), so give Claude the
         # latest memories to reason over instead of nothing.
-        with db() as conn:
-            rows = conn.execute(
-                "SELECT created_at::date, text, tags FROM memories ORDER BY created_at DESC LIMIT %s",
-                (limit,),
-            ).fetchall()
-        if not rows:
-            return "Memory is empty."
-        return "No keyword match. Most recent memories:\n" + "\n".join(
-            f"[{d}] {t}" + (f"  (tags: {g})" if g else "") for d, t, g in rows
-        )
-    return "\n".join(f"[{d}] {t}" + (f"  (tags: {g})" if g else "") for d, t, g in rows)
+        rows = conn.execute(
+            "SELECT created_at::date, text, tags FROM memories ORDER BY created_at DESC LIMIT %s",
+            (limit,),
+        ).fetchall()
+    if not rows:
+        return "Memory is empty."
+    return "No keyword match. Most recent memories:\n" + _fmt(rows)
 
 
 @mcp.tool()

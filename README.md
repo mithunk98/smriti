@@ -13,7 +13,7 @@ Laptop 2 (Claude Code) ─┘
 | Tool | What it does |
 |---|---|
 | `remember(text, tags)` | Save a fact, decision or plan |
-| `recall(query)` | Search memories, best matches first |
+| `recall(query)` | Search memories by meaning (with a Voyage key) or keywords, best matches first |
 | `recent(days)` | List everything saved in the last N days |
 
 ## Setup
@@ -36,7 +36,14 @@ python3 -c "import secrets; print(secrets.token_urlsafe(32))"
 
 The free tier sleeps after about 15 minutes idle, so the first request after that takes around a minute.
 
-### 4. Connect Claude Code (on each laptop)
+### 4. Optional: search by meaning
+1. In the Supabase **SQL Editor**, run [`schema-semantic.sql`](schema-semantic.sql).
+2. Create an API key at [voyageai.com](https://www.voyageai.com) and add it on Render as `VOYAGE_API_KEY`.
+
+Existing memories are embedded automatically on the next `remember`/`recall`. If Voyage is unreachable, memories still save and search falls back to keywords. Set `VOYAGE_MODEL` to use a model other than `voyage-3.5-lite`.
+
+### 5. Connect Claude Code (on each laptop)
+On Windows, paste [`setup-laptop.ps1`](setup-laptop.ps1) into PowerShell: it adds the server and the `CLAUDE.md` instructions below. Elsewhere:
 ```bash
 claude mcp add --transport http --scope user smriti \
   https://YOUR-APP.onrender.com/mcp \
@@ -60,6 +67,6 @@ uvicorn server:app --port 8000
 
 ## Roadmap
 - [x] Week 1: cloud memory (`remember` / `recall` / `recent`)
-- [ ] Week 2: semantic search (pgvector + embeddings)
+- [x] Week 2: semantic search (pgvector + Voyage embeddings)
 - [ ] Week 3: action tools (tasks, Spotify focus playlists)
 - [ ] Week 4: proactive morning brief and weekly review
