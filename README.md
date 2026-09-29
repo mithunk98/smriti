@@ -64,7 +64,7 @@ The same bot also answers commands from your chat only (messages from anyone els
 The server sends the brief once a day at or after `BRIEF_TIME` (so a brief missed while it was down still goes out), and the `briefs` table prevents duplicates across restarts.
 
 ### 7. Connect Claude Code (on each laptop)
-On Windows, paste [`setup-laptop.ps1`](setup-laptop.ps1) into PowerShell: it adds the server and the `CLAUDE.md` instructions below. Elsewhere:
+On Windows, paste [`setup-laptop.ps1`](setup-laptop.ps1) into PowerShell; on Mac/Linux, run `bash setup-laptop.sh`. Both add the server and the `CLAUDE.md` instructions below. Manually:
 ```bash
 claude mcp add --transport http --scope user smriti \
   https://YOUR-APP.onrender.com/mcp \
