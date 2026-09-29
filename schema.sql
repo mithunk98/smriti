@@ -22,3 +22,10 @@ CREATE TABLE IF NOT EXISTS tasks (
   created_at timestamptz NOT NULL DEFAULT now(),
   done_at    timestamptz
 );
+
+-- Week 4: morning brief.
+-- One row per day a brief was sent, so it is never sent twice.
+CREATE TABLE IF NOT EXISTS briefs (
+  day     date PRIMARY KEY,
+  sent_at timestamptz NOT NULL DEFAULT now()
+);

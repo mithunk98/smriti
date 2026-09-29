@@ -20,6 +20,7 @@ Laptop 2 (Claude Code) ─┘
 | `add_task(title, due, notes)` | Add a to-do, optionally with a due date |
 | `list_tasks()` | Open tasks, soonest first, with overdue / due-today flags |
 | `complete_task(id)` | Mark a task as done |
+| `morning_brief(send_to_telegram)` | Today's overdue / due / upcoming tasks and yesterday's notes |
 
 ## Setup
 
@@ -50,7 +51,15 @@ Existing memories are embedded automatically on the next `remember`/`recall`. If
 ### 5. Tasks
 In the Supabase **SQL Editor**, run [`schema-tasks.sql`](schema-tasks.sql). Due dates use your local day; set `SMRITI_TIMEZONE` (default `Asia/Kolkata`) if you are elsewhere.
 
-### 6. Connect Claude Code (on each laptop)
+### 6. Morning brief on Telegram
+1. In the Supabase **SQL Editor**, run [`schema-brief.sql`](schema-brief.sql).
+2. In Telegram, message **@BotFather**, send `/newbot` and copy the bot token. Send any message to your new bot.
+3. Open `https://api.telegram.org/bot<TOKEN>/getUpdates` in your browser and copy `"chat":{"id": ...}`.
+4. On Render add `TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID` (optional: `BRIEF_TIME`, default `07:30`).
+
+The server sends the brief once a day at or after `BRIEF_TIME` (so a brief missed while it was down still goes out), and the `briefs` table prevents duplicates across restarts.
+
+### 7. Connect Claude Code (on each laptop)
 On Windows, paste [`setup-laptop.ps1`](setup-laptop.ps1) into PowerShell: it adds the server and the `CLAUDE.md` instructions below. Elsewhere:
 ```bash
 claude mcp add --transport http --scope user smriti \
@@ -70,6 +79,7 @@ Then add to `~/.claude/CLAUDE.md`:
 - When I ask what to do, plan my day or week, or start a work session, call `list_tasks` and point out anything overdue or due soon.
 - When I say I finished something, mark it with `complete_task`.
 - If a saved memory is wrong or outdated, fix it with `update_memory` or delete it with `forget` (ask me first if unsure) instead of saving a correction.
+- When I say "brief me" or ask to plan my day, call `morning_brief`.
 ```
 
 ## Run locally
@@ -84,4 +94,4 @@ uvicorn server:app --port 8000
 - [x] Week 2: semantic search (pgvector + Voyage embeddings)
 - [x] Week 3: tasks with due dates
 - [ ] Later: calendar and Spotify focus playlists
-- [ ] Week 4: proactive morning brief and weekly review
+- [x] Week 4: morning brief on Telegram

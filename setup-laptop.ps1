@@ -63,6 +63,16 @@
     Write-Host "Smriti memory-fix instruction added to $md" -ForegroundColor Green
   }
 
+  if ((Test-Path $md) -and (Select-String -Path $md -Pattern "morning_brief" -Quiet)) {
+    Write-Host "CLAUDE.md already has Smriti brief instructions." -ForegroundColor Green
+  } else {
+    $text = @'
+- When I say "brief me" or ask to plan my day, call `morning_brief`.
+'@
+    [IO.File]::AppendAllText($md, $text)
+    Write-Host "Smriti brief instruction added to $md" -ForegroundColor Green
+  }
+
   Write-Host ""
   Write-Host "Done. Check the connection with: claude mcp list" -ForegroundColor Cyan
 }

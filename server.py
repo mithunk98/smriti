@@ -2,9 +2,11 @@ import json
 import logging
 import os
 import re
+import threading
+import time
 import urllib.request
 from contextlib import contextmanager
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from zoneinfo import ZoneInfo
 
 import psycopg
@@ -19,7 +21,13 @@ VOYAGE_API_KEY = os.environ.get("VOYAGE_API_KEY", "").strip()
 VOYAGE_MODEL = os.environ.get("VOYAGE_MODEL", "voyage-3.5-lite")
 VOYAGE_URL = "https://api.voyageai.com/v1/embeddings"
 # "Today" for task due dates is the user's local day, not the server's (UTC).
-TIMEZONE = ZoneInfo(os.environ.get("SMRITI_TIMEZONE", "Asia/Kolkata"))
+TIMEZONE_NAME = os.environ.get("SMRITI_TIMEZONE", "Asia/Kolkata")
+TIMEZONE = ZoneInfo(TIMEZONE_NAME)
+# Optional: daily morning brief sent to Telegram at BRIEF_TIME (local, HH:MM).
+TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
+TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "").strip()
+TELEGRAM_URL = "https://api.telegram.org"
+BRIEF_TIME = datetime.strptime(os.environ.get("BRIEF_TIME", "07:30"), "%H:%M").time()
 
 log = logging.getLogger("smriti")
 
@@ -29,7 +37,7 @@ mcp = MCPServer(
         "Personal memory and task list for the user. Save important facts, decisions and plans with remember; "
         "look things up with recall before answering personal questions. Fix wrong memories with update_memory "
         "or forget rather than saving corrections. Track things the user has to do "
-        "with add_task / list_tasks / complete_task."
+        "with add_task / list_tasks / complete_task. morning_brief summarizes the day."
     ),
 )
 
@@ -74,6 +82,8 @@ def db():
             hint = " Hint: run schema-semantic.sql in the Supabase SQL Editor to enable search by meaning."
         elif isinstance(e, psycopg.errors.UndefinedTable) and "tasks" in str(e):
             hint = " Hint: run schema-tasks.sql in the Supabase SQL Editor to enable tasks."
+        elif isinstance(e, psycopg.errors.UndefinedTable) and "briefs" in str(e):
+            hint = " Hint: run schema-brief.sql in the Supabase SQL Editor to enable the morning brief."
         raise ToolError(f"Database error ({type(e).__name__}): {_redact(detail)}{hint}") from e
 
 
@@ -278,6 +288,106 @@ def complete_task(task_id: int) -> str:
     return f"Done: #{task_id} {row[0]}."
 
 
+def _build_brief(conn, today: date) -> str:
+    yesterday = today - timedelta(days=1)
+    tasks = conn.execute(
+        "SELECT title, due FROM tasks WHERE done_at IS NULL ORDER BY due NULLS LAST, id"
+    ).fetchall()
+    finished = conn.execute(
+        "SELECT title FROM tasks WHERE (done_at AT TIME ZONE %s)::date = %s ORDER BY done_at",
+        (TIMEZONE_NAME, yesterday),
+    ).fetchall()
+    saved = conn.execute(
+        "SELECT text FROM memories WHERE (created_at AT TIME ZONE %s)::date = %s ORDER BY created_at",
+        (TIMEZONE_NAME, yesterday),
+    ).fetchall()
+
+    overdue = [(t, d) for t, d in tasks if d and d < today]
+    due_today = [t for t, d in tasks if d == today]
+    week = [(t, d) for t, d in tasks if d and today < d <= today + timedelta(days=7)]
+    later = [(t, d) for t, d in tasks if d is None or d > today + timedelta(days=7)]
+
+    parts = [f"☀️ Good morning! {today:%A %d %B}"]
+    if overdue:
+        parts.append("⚠️ Overdue\n" + "\n".join(f"• {t} (was due {d:%d %b})" for t, d in overdue))
+    if due_today:
+        parts.append("📌 Today\n" + "\n".join(f"• {t}" for t in due_today))
+    if week:
+        parts.append("📅 Next 7 days\n" + "\n".join(
+            f"• {d:%a %d %b}: {t} (in {(d - today).days} day{'s' if (d - today).days != 1 else ''})" for t, d in week
+        ))
+    if later:
+        dated = [(t, d) for t, d in later if d]
+        nxt = f" (next: {dated[0][0]}, {dated[0][1]:%a %d %b})" if dated else ""
+        parts.append(f"🗓 Later: {len(later)} task{'s' if len(later) != 1 else ''}{nxt}")
+    if not (overdue or due_today or week):
+        parts.append("Nothing due this week. Enjoy the day!")
+    if finished:
+        parts.append("✅ Finished yesterday\n" + "\n".join(f"• {t}" for (t,) in finished))
+    if saved:
+        parts.append("🧠 Saved yesterday\n" + "\n".join(f"• {t}" for (t,) in saved))
+    return "\n\n".join(parts)
+
+
+def _send_telegram(text: str) -> None:
+    req = urllib.request.Request(
+        f"{TELEGRAM_URL}/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
+        data=json.dumps({"chat_id": TELEGRAM_CHAT_ID, "text": text}).encode(),
+        headers={"Content-Type": "application/json"},
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=20) as resp:
+            if not json.load(resp).get("ok"):
+                raise RuntimeError("Telegram did not accept the message")
+    except Exception as e:
+        # Never let the bot token (part of the URL) reach logs or Claude.
+        raise RuntimeError(f"Telegram send failed: {str(e).replace(TELEGRAM_BOT_TOKEN, '***')}") from None
+
+
+@mcp.tool()
+def morning_brief(send_to_telegram: bool = False) -> str:
+    """Today's brief: overdue, today's and upcoming tasks, plus what was finished and saved yesterday. Use when the user asks for a brief or to plan the day. send_to_telegram=True also sends it to their phone (to test delivery)."""
+    with db() as conn:
+        brief = _build_brief(conn, _today())
+    if send_to_telegram:
+        if not (TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID):
+            raise ToolError("Telegram is not set up: add TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID on the server.")
+        try:
+            _send_telegram(brief)
+        except RuntimeError as e:
+            raise ToolError(str(e)) from None
+        return "Sent to Telegram:\n\n" + brief
+    return brief
+
+
+def _send_daily_brief_if_due(now: datetime) -> bool:
+    """Send today's brief once, at or after BRIEF_TIME. The briefs table makes it once per day across restarts."""
+    if now.time() < BRIEF_TIME:
+        return False
+    with db() as conn:
+        if conn.execute(
+            "INSERT INTO briefs (day) VALUES (%s) ON CONFLICT DO NOTHING RETURNING day", (now.date(),)
+        ).fetchone() is None:
+            return False  # already sent today
+        try:
+            _send_telegram(_build_brief(conn, now.date()))
+        except Exception:
+            conn.execute("DELETE FROM briefs WHERE day = %s", (now.date(),))  # retry later
+            raise
+    return True
+
+
+def _brief_scheduler() -> None:
+    while True:
+        try:
+            if _send_daily_brief_if_due(datetime.now(TIMEZONE)):
+                log.info("Morning brief sent")
+        except Exception as e:
+            log.warning("Morning brief failed, retrying in 15 minutes: %s", e)
+            time.sleep(14 * 60)
+        time.sleep(60)
+
+
 class BearerAuth:
     """Rejects any HTTP request that doesn't carry the secret token."""
 
@@ -296,3 +406,6 @@ class BearerAuth:
 
 
 app = BearerAuth(mcp.streamable_http_app(stateless_http=True, host="0.0.0.0"))
+
+if TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID and os.environ.get("SMRITI_SCHEDULER", "1") == "1":
+    threading.Thread(target=_brief_scheduler, name="morning-brief", daemon=True).start()
