@@ -12,3 +12,13 @@ CREATE INDEX memories_search_idx ON memories USING gin (search);
 -- a personal memory store is small enough to search without an index.
 CREATE EXTENSION IF NOT EXISTS vector;
 ALTER TABLE memories ADD COLUMN IF NOT EXISTS embedding vector;
+
+-- Week 3: tasks.
+CREATE TABLE IF NOT EXISTS tasks (
+  id         bigserial PRIMARY KEY,
+  title      text NOT NULL,
+  due        date,
+  notes      text NOT NULL DEFAULT '',
+  created_at timestamptz NOT NULL DEFAULT now(),
+  done_at    timestamptz
+);

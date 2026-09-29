@@ -39,6 +39,20 @@
     Write-Host "Smriti instructions added to $md" -ForegroundColor Green
   }
 
+  if ((Test-Path $md) -and (Select-String -Path $md -Pattern "list_tasks" -Quiet)) {
+    Write-Host "CLAUDE.md already has Smriti task instructions." -ForegroundColor Green
+  } else {
+    $text = @'
+
+## Smriti tasks
+- When I mention something I have to do, add it with `add_task` (convert dates like "next Friday" to YYYY-MM-DD).
+- When I ask what to do, plan my day or week, or start a work session, call `list_tasks` and point out anything overdue or due soon.
+- When I say I finished something, mark it with `complete_task`.
+'@
+    [IO.File]::AppendAllText($md, $text)
+    Write-Host "Smriti task instructions added to $md" -ForegroundColor Green
+  }
+
   Write-Host ""
   Write-Host "Done. Check the connection with: claude mcp list" -ForegroundColor Cyan
 }

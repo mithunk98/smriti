@@ -4,6 +4,8 @@ import os
 import re
 import urllib.request
 from contextlib import contextmanager
+from datetime import date, datetime
+from zoneinfo import ZoneInfo
 
 import psycopg
 from mcp.server.mcpserver import MCPServer
@@ -16,10 +18,19 @@ TOKEN = os.environ["SMRITI_TOKEN"]
 VOYAGE_API_KEY = os.environ.get("VOYAGE_API_KEY", "").strip()
 VOYAGE_MODEL = os.environ.get("VOYAGE_MODEL", "voyage-3.5-lite")
 VOYAGE_URL = "https://api.voyageai.com/v1/embeddings"
+# "Today" for task due dates is the user's local day, not the server's (UTC).
+TIMEZONE = ZoneInfo(os.environ.get("SMRITI_TIMEZONE", "Asia/Kolkata"))
 
 log = logging.getLogger("smriti")
 
-mcp = MCPServer("smriti", instructions="Personal memory for the user. Save important facts, decisions and plans with remember; look things up with recall before answering personal questions.")
+mcp = MCPServer(
+    "smriti",
+    instructions=(
+        "Personal memory and task list for the user. Save important facts, decisions and plans with remember; "
+        "look things up with recall before answering personal questions. Track things the user has to do "
+        "with add_task / list_tasks / complete_task."
+    ),
+)
 
 
 def _redact(msg: str) -> str:
@@ -60,6 +71,8 @@ def db():
             hint = " Hint: the database password contains '@'; use a password with only letters and numbers."
         elif isinstance(e, psycopg.errors.UndefinedColumn) and "embedding" in str(e):
             hint = " Hint: run schema-semantic.sql in the Supabase SQL Editor to enable search by meaning."
+        elif isinstance(e, psycopg.errors.UndefinedTable) and "tasks" in str(e):
+            hint = " Hint: run schema-tasks.sql in the Supabase SQL Editor to enable tasks."
         raise ToolError(f"Database error ({type(e).__name__}): {_redact(detail)}{hint}") from e
 
 
@@ -166,6 +179,76 @@ def recent(days: int = 7) -> str:
             (days,),
         ).fetchall()
     return "\n".join(f"[{d}] {t}" for d, t in rows) or "Nothing in that period."
+
+
+def _today() -> date:
+    return datetime.now(TIMEZONE).date()
+
+
+def _parse_due(due: str) -> date | None:
+    due = due.strip()
+    if not due:
+        return None
+    try:
+        return date.fromisoformat(due)
+    except ValueError:
+        raise ToolError(f"Invalid due date {due!r}: use YYYY-MM-DD (today is {_today()}).") from None
+
+
+def _when(due: date | None, today: date) -> str:
+    if due is None:
+        return "no due date"
+    days = (due - today).days
+    if days < 0:
+        return f"OVERDUE by {-days} day{'s' if days != -1 else ''}, was due {due}"
+    if days == 0:
+        return f"due TODAY, {due}"
+    if days == 1:
+        return f"due tomorrow, {due}"
+    return f"due {due:%a %d %b}, in {days} days"
+
+
+@mcp.tool()
+def add_task(title: str, due: str = "", notes: str = "") -> str:
+    """Add something the user has to do. `due` is a date as YYYY-MM-DD (convert "next Friday" etc. yourself; leave empty if there is no deadline)."""
+    due_date = _parse_due(due)
+    with db() as conn:
+        (task_id,) = conn.execute(
+            "INSERT INTO tasks (title, due, notes) VALUES (%s, %s, %s) RETURNING id", (title, due_date, notes)
+        ).fetchone()
+    return f"Added task #{task_id}: {title} ({_when(due_date, _today())})."
+
+
+@mcp.tool()
+def list_tasks(include_done: bool = False) -> str:
+    """List the user's open tasks, soonest due first, with overdue ones flagged. Check this when the user asks what to do or plans their day/week."""
+    with db() as conn:
+        rows = conn.execute(
+            """SELECT id, title, due, notes, done_at FROM tasks
+               WHERE %s OR done_at IS NULL
+               ORDER BY done_at IS NOT NULL, due NULLS LAST, id""",
+            (include_done,),
+        ).fetchall()
+    if not rows:
+        return "No open tasks."
+    today = _today()
+    lines = [f"Today is {today:%A %d %B %Y}."]
+    for task_id, title, due, notes, done_at in rows:
+        status = f"done {done_at.astimezone(TIMEZONE):%d %b}" if done_at else _when(due, today)
+        lines.append(f"#{task_id} {title} ({status})" + (f"  notes: {notes}" if notes else ""))
+    return "\n".join(lines)
+
+
+@mcp.tool()
+def complete_task(task_id: int) -> str:
+    """Mark a task as done. Use the #id from list_tasks."""
+    with db() as conn:
+        row = conn.execute(
+            "UPDATE tasks SET done_at = now() WHERE id = %s AND done_at IS NULL RETURNING title", (task_id,)
+        ).fetchone()
+    if row is None:
+        raise ToolError(f"No open task #{task_id}. Call list_tasks to see the ids.")
+    return f"Done: #{task_id} {row[0]}."
 
 
 class BearerAuth:
