@@ -15,6 +15,8 @@ Laptop 2 (Claude Code) ─┘
 | `remember(text, tags)` | Save a fact, decision or plan |
 | `recall(query)` | Search memories by meaning (with a Voyage key) or keywords, best matches first |
 | `recent(days)` | List everything saved in the last N days |
+| `update_memory(id, text)` | Correct a memory in place |
+| `forget(id)` | Delete a memory |
 | `add_task(title, due, notes)` | Add a to-do, optionally with a due date |
 | `list_tasks()` | Open tasks, soonest first, with overdue / due-today flags |
 | `complete_task(id)` | Mark a task as done |
@@ -67,6 +69,7 @@ Then add to `~/.claude/CLAUDE.md`:
 - When I mention something I have to do, add it with `add_task` (convert dates like "next Friday" to YYYY-MM-DD).
 - When I ask what to do, plan my day or week, or start a work session, call `list_tasks` and point out anything overdue or due soon.
 - When I say I finished something, mark it with `complete_task`.
+- If a saved memory is wrong or outdated, fix it with `update_memory` or delete it with `forget` (ask me first if unsure) instead of saving a correction.
 ```
 
 ## Run locally

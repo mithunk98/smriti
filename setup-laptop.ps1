@@ -53,6 +53,16 @@
     Write-Host "Smriti task instructions added to $md" -ForegroundColor Green
   }
 
+  if ((Test-Path $md) -and (Select-String -Path $md -Pattern "update_memory" -Quiet)) {
+    Write-Host "CLAUDE.md already has Smriti memory-fix instructions." -ForegroundColor Green
+  } else {
+    $text = @'
+- If a saved memory is wrong or outdated, fix it with `update_memory` or delete it with `forget` (ask me first if unsure) instead of saving a correction.
+'@
+    [IO.File]::AppendAllText($md, $text)
+    Write-Host "Smriti memory-fix instruction added to $md" -ForegroundColor Green
+  }
+
   Write-Host ""
   Write-Host "Done. Check the connection with: claude mcp list" -ForegroundColor Cyan
 }

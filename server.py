@@ -27,7 +27,8 @@ mcp = MCPServer(
     "smriti",
     instructions=(
         "Personal memory and task list for the user. Save important facts, decisions and plans with remember; "
-        "look things up with recall before answering personal questions. Track things the user has to do "
+        "look things up with recall before answering personal questions. Fix wrong memories with update_memory "
+        "or forget rather than saving corrections. Track things the user has to do "
         "with add_task / list_tasks / complete_task."
     ),
 )
@@ -109,7 +110,7 @@ def _backfill(conn, batch: int = 100) -> None:
 
 
 def _fmt(rows) -> str:
-    return "\n".join(f"[{d}] {t}" + (f"  (tags: {g})" if g else "") for d, t, g in rows)
+    return "\n".join(f"#{i} [{d}] {t}" + (f"  (tags: {g})" if g else "") for i, d, t, g in rows)
 
 
 @mcp.tool()
@@ -133,7 +134,7 @@ def recall(query: str, limit: int = 5) -> str:
             if q:
                 v = _vec(q[0])
                 rows = conn.execute(
-                    """SELECT created_at::date AS day, text, tags, 1 - (embedding <=> %s::vector) AS score
+                    """SELECT id, created_at::date AS day, text, tags, 1 - (embedding <=> %s::vector) AS score
                        FROM memories
                        WHERE embedding IS NOT NULL AND vector_dims(embedding) = vector_dims(%s::vector)
                        ORDER BY score DESC, created_at DESC
@@ -142,15 +143,15 @@ def recall(query: str, limit: int = 5) -> str:
                 ).fetchall()
                 if rows:
                     return "Closest memories by meaning (best first; ignore weak matches):\n" + "\n".join(
-                        f"(match {score:.2f}) " + _fmt([(d, t, g)]) for d, t, g, score in rows
+                        f"(match {score:.2f}) " + _fmt([(i, d, t, g)]) for i, d, t, g, score in rows
                     )
             else:
                 note = "(Search by meaning is unavailable right now, e.g. rate-limited; keyword results below.)\n"
 
         rows = conn.execute(
-            """WITH q AS (  -- match ANY word, best matches first
-                 SELECT to_tsquery('english', replace(plainto_tsquery('english', %s)::text, '&', '|')) AS q)
-               SELECT created_at::date AS day, text, tags FROM memories, q
+            """WITH q AS (  -- match ANY word, best matches first; 'simple' so words aren't stemmed twice
+                 SELECT to_tsquery('simple', replace(plainto_tsquery('english', %s)::text, '&', '|')) AS q)
+               SELECT id, created_at::date AS day, text, tags FROM memories, q
                WHERE search @@ q.q
                ORDER BY ts_rank(search, q.q) DESC, created_at DESC
                LIMIT %s""",
@@ -162,7 +163,7 @@ def recall(query: str, limit: int = 5) -> str:
         # Keyword search misses paraphrases ("build" vs "built"), so give Claude the
         # latest memories to reason over instead of nothing.
         rows = conn.execute(
-            "SELECT created_at::date AS day, text, tags FROM memories ORDER BY created_at DESC LIMIT %s",
+            "SELECT id, created_at::date AS day, text, tags FROM memories ORDER BY created_at DESC LIMIT %s",
             (limit,),
         ).fetchall()
     if not rows:
@@ -175,10 +176,36 @@ def recent(days: int = 7) -> str:
     """List everything remembered in the last N days (good for weekly reviews)."""
     with db() as conn:
         rows = conn.execute(
-            "SELECT created_at::date AS day, text FROM memories WHERE created_at > now() - make_interval(days => %s) ORDER BY created_at",
+            "SELECT id, created_at::date AS day, text, tags FROM memories WHERE created_at > now() - make_interval(days => %s) ORDER BY created_at",
             (days,),
         ).fetchall()
-    return "\n".join(f"[{d}] {t}" for d, t in rows) or "Nothing in that period."
+    return _fmt(rows) or "Nothing in that period."
+
+
+@mcp.tool()
+def update_memory(memory_id: int, text: str, tags: str | None = None) -> str:
+    """Correct a saved memory in place (use the #id from recall/recent) instead of saving a separate correction. Tags are kept unless given."""
+    with db() as conn:
+        # Clearing the embedding makes the next remember/recall re-embed the new text.
+        row = conn.execute(
+            "UPDATE memories SET text = %s, tags = COALESCE(%s, tags), embedding = NULL WHERE id = %s RETURNING id",
+            (text, tags, memory_id),
+        ).fetchone()
+        if row and VOYAGE_API_KEY:
+            _backfill(conn)
+    if row is None:
+        raise ToolError(f"No memory #{memory_id}. Use recall or recent to find the id.")
+    return f"Updated memory #{memory_id}."
+
+
+@mcp.tool()
+def forget(memory_id: int) -> str:
+    """Permanently delete a memory that is wrong or no longer wanted (use the #id from recall/recent). Confirm with the user first if unsure."""
+    with db() as conn:
+        row = conn.execute("DELETE FROM memories WHERE id = %s RETURNING text", (memory_id,)).fetchone()
+    if row is None:
+        raise ToolError(f"No memory #{memory_id}. Use recall or recent to find the id.")
+    return f"Forgot memory #{memory_id}: {row[0]}"
 
 
 def _today() -> date:
