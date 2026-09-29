@@ -39,7 +39,7 @@ python3 -c "import secrets; print(secrets.token_urlsafe(32))"
 - Start: `uvicorn server:app --host 0.0.0.0 --port $PORT`
 - Environment: `DATABASE_URL` (from step 1), `SMRITI_TOKEN` (from step 2)
 
-The free tier sleeps after about 15 minutes idle, so the first request after that takes around a minute.
+The free tier sleeps after about 15 minutes idle, so the first request after that takes around a minute. To keep it awake, point a free uptime monitor (e.g. UptimeRobot, every 5-10 minutes) at `https://YOUR-APP.onrender.com/health`, a public endpoint that returns `ok` and no data.
 
 ### 4. Optional: search by meaning
 1. In the Supabase **SQL Editor**, run [`schema-semantic.sql`](schema-semantic.sql).

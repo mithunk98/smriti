@@ -286,6 +286,9 @@ class BearerAuth:
 
     async def __call__(self, scope, receive, send):
         if scope["type"] == "http":
+            if scope["path"] == "/health":
+                # Public, data-free endpoint for uptime pings that keep the free instance awake.
+                return await PlainTextResponse("ok")(scope, receive, send)
             auth = dict(scope["headers"]).get(b"authorization", b"").decode()
             if auth != f"Bearer {TOKEN}":
                 return await PlainTextResponse("Unauthorized", status_code=401)(scope, receive, send)
