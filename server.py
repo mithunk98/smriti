@@ -4,6 +4,7 @@ import os
 import re
 import threading
 import time
+import urllib.error
 import urllib.request
 from contextlib import contextmanager
 from datetime import date, datetime, timedelta
@@ -340,8 +341,15 @@ def _send_telegram(text: str) -> None:
             if not json.load(resp).get("ok"):
                 raise RuntimeError("Telegram did not accept the message")
     except Exception as e:
+        detail = str(e)
+        if isinstance(e, urllib.error.HTTPError):
+            # Telegram explains rejections in the body, e.g. "Bad Request: chat not found".
+            try:
+                detail += f" ({json.load(e).get('description', '')})"
+            except Exception:
+                pass
         # Never let the bot token (part of the URL) reach logs or Claude.
-        raise RuntimeError(f"Telegram send failed: {str(e).replace(TELEGRAM_BOT_TOKEN, '***')}") from None
+        raise RuntimeError(f"Telegram send failed: {detail.replace(TELEGRAM_BOT_TOKEN, '***')}") from None
 
 
 @mcp.tool()
