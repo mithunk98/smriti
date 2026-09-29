@@ -74,7 +74,18 @@ def recall(query: str, limit: int = 10) -> str:
             (query, limit),
         ).fetchall()
     if not rows:
-        return "No matching memories."
+        # Keyword search misses paraphrases ("build" vs "built"), so give Claude the
+        # latest memories to reason over instead of nothing.
+        with db() as conn:
+            rows = conn.execute(
+                "SELECT created_at::date, text, tags FROM memories ORDER BY created_at DESC LIMIT %s",
+                (limit,),
+            ).fetchall()
+        if not rows:
+            return "Memory is empty."
+        return "No keyword match. Most recent memories:\n" + "\n".join(
+            f"[{d}] {t}" + (f"  (tags: {g})" if g else "") for d, t, g in rows
+        )
     return "\n".join(f"[{d}] {t}" + (f"  (tags: {g})" if g else "") for d, t, g in rows)
 
 
