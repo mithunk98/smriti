@@ -1,6 +1,10 @@
 import os
+import re
+from contextlib import contextmanager
+
 import psycopg
 from mcp.server.mcpserver import MCPServer
+from mcp.server.mcpserver.exceptions import ToolError
 from starlette.responses import PlainTextResponse
 
 DATABASE_URL = os.environ["DATABASE_URL"]
@@ -9,8 +13,36 @@ TOKEN = os.environ["SMRITI_TOKEN"]
 mcp = MCPServer("smriti", instructions="Personal memory for the user. Save important facts, decisions and plans with remember; look things up with recall before answering personal questions.")
 
 
+def _redact(msg: str) -> str:
+    """Hide the database password/URL so errors are safe to show."""
+    msg = msg.replace(DATABASE_URL, "***")
+    try:
+        password = psycopg.conninfo.conninfo_to_dict(DATABASE_URL).get("password")
+    except psycopg.Error:
+        password = None
+    secrets = [password] if password else []
+    # A password containing @ or / is mis-split by URL parsing, so also hide
+    # every fragment of the password exactly as written in the URL.
+    userinfo = DATABASE_URL.split("://", 1)[-1].rsplit("@", 1)[0]
+    if ":" in userinfo:
+        secrets += [p for p in re.split(r"[@/:]", userinfo.split(":", 1)[1]) if len(p) >= 2]
+    for secret in sorted(secrets, key=len, reverse=True):
+        msg = msg.replace(str(secret), "***")
+    return re.sub(r"://\S*@", "://***@", msg)
+
+
+@contextmanager
 def db():
-    return psycopg.connect(DATABASE_URL, autocommit=True)
+    try:
+        with psycopg.connect(DATABASE_URL, autocommit=True) as conn:
+            yield conn
+    except psycopg.Error as e:
+        # Surface the real cause to Claude instead of a generic "Error executing tool".
+        detail = " ".join(str(e).split())[:500] or "no details"
+        hint = ""
+        if DATABASE_URL.split("://", 1)[-1].count("@") > 1:
+            hint = " Hint: the database password contains '@'; use a password with only letters and numbers."
+        raise ToolError(f"Database error ({type(e).__name__}): {_redact(detail)}{hint}") from e
 
 
 @mcp.tool()
