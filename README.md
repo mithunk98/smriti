@@ -59,6 +59,8 @@ In the Supabase **SQL Editor**, run [`schema-tasks.sql`](schema-tasks.sql). Due 
 
 The same bot also answers commands from your chat only (messages from anyone else are ignored): `/task Submit lab record sunday`, `/tasks`, `/done 4`, `/remember ...`, `/recall ...`, `/recent`, `/forget 9`, `/brief`. Type `/` in the chat for the menu.
 
+**Plain English and voice notes (optional, free):** create a key at [console.groq.com](https://console.groq.com) and add it on Render as `GROQ_API_KEY`. Then just type or send a voice note ("remind me to call mom on Sunday", "I finished the lab record"): Whisper on Groq transcribes it and an open model on Groq picks the action. The AI can add/complete tasks, remember, recall and brief, but never delete; use `/forget` for that. Models are configurable with `GROQ_CHAT_MODEL` (default `llama-3.3-70b-versatile`) and `GROQ_WHISPER_MODEL` (default `whisper-large-v3-turbo`).
+
 The server sends the brief once a day at or after `BRIEF_TIME` (so a brief missed while it was down still goes out), and the `briefs` table prevents duplicates across restarts.
 
 ### 7. Connect Claude Code (on each laptop)
@@ -96,7 +98,7 @@ uvicorn server:app --port 8000
 - [x] Week 2: semantic search (pgvector + Voyage embeddings)
 - [x] Week 3: tasks with due dates
 - [x] Telegram two-way: commands from your phone
-- [ ] Plain English + voice notes in Telegram
+- [x] Plain English + voice notes in Telegram (Groq)
 - [ ] Google Calendar sync
 - [ ] Spotify focus playlists
 - [x] Week 4: morning brief on Telegram

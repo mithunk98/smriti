@@ -29,6 +29,11 @@ TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "").strip()
 TELEGRAM_URL = "https://api.telegram.org"
 BRIEF_TIME = datetime.strptime(os.environ.get("BRIEF_TIME", "07:30"), "%H:%M").time()
+# Optional: plain English and voice notes in Telegram, via Groq (free tier).
+GROQ_API_KEY = os.environ.get("GROQ_API_KEY", "").strip()
+GROQ_URL = "https://api.groq.com/openai/v1"
+GROQ_CHAT_MODEL = os.environ.get("GROQ_CHAT_MODEL", "llama-3.3-70b-versatile")
+GROQ_WHISPER_MODEL = os.environ.get("GROQ_WHISPER_MODEL", "whisper-large-v3-turbo")
 
 log = logging.getLogger("smriti")
 
@@ -451,12 +456,17 @@ def _handle_bot_message(text: str) -> str:
     if _pending_cmd and not text.startswith("/"):
         text = f"{_pending_cmd} {text}"
     _pending_cmd = None
+    if not text.startswith("/"):
+        if GROQ_API_KEY:
+            return _ask_ai(text)
+        return "I only understand commands (add GROQ_API_KEY on the server for plain English).\n\n" + BOT_HELP
     cmd, _, arg = text.partition(" ")
     cmd = cmd.lower().split("@")[0]  # "/tasks@my_bot" form
     arg = arg.strip()
     try:
         if cmd in ("/start", "/help"):
-            return BOT_HELP + BOT_TIP
+            extra = "\nOr just type or send a voice note in plain English, e.g. \"remind me to call mom on Sunday\"." if GROQ_API_KEY else ""
+            return BOT_HELP + BOT_TIP + extra
         if cmd in ASK_FOR and not arg:
             _pending_cmd = cmd
             return ASK_FOR[cmd] + ("\n\n" + list_tasks() if cmd == "/done" else "")
@@ -483,12 +493,142 @@ def _handle_bot_message(text: str) -> str:
             return recent(int(arg) if arg.isdigit() else 7)
         if cmd == "/brief":
             return morning_brief()
-        return "I only understand commands for now (plain English and voice notes are coming).\n\n" + BOT_HELP
+        return "I don't know that command.\n\n" + BOT_HELP
     except ToolError as e:
         return f"⚠️ {e}"
     except Exception:
         log.exception("Telegram command failed")
         return "⚠️ Something went wrong on the server."
+
+
+def _post(url: str, data: bytes, headers: dict, timeout: float = 60) -> dict:
+    """POST to Groq; errors carry Groq's message but never the API key."""
+    req = urllib.request.Request(url, data=data, headers={"Authorization": f"Bearer {GROQ_API_KEY}", **headers})
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            return json.load(resp)
+    except urllib.error.HTTPError as e:
+        try:
+            detail = json.load(e).get("error", {}).get("message", "")
+        except Exception:
+            detail = ""
+        raise RuntimeError(f"Groq error {e.code}: {detail}".replace(GROQ_API_KEY, "***")) from None
+    except Exception as e:
+        raise RuntimeError(f"Groq unreachable: {e}".replace(GROQ_API_KEY, "***")) from None
+
+
+def _transcribe(audio: bytes, filename: str = "voice.ogg") -> str:
+    boundary = "smriti" + os.urandom(8).hex()
+    fields = {"model": GROQ_WHISPER_MODEL, "response_format": "json"}
+    body = b"".join(
+        f'--{boundary}\r\nContent-Disposition: form-data; name="{k}"\r\n\r\n{v}\r\n'.encode() for k, v in fields.items()
+    ) + (
+        f'--{boundary}\r\nContent-Disposition: form-data; name="file"; filename="{filename}"\r\n'
+        "Content-Type: application/octet-stream\r\n\r\n"
+    ).encode() + audio + f"\r\n--{boundary}--\r\n".encode()
+    result = _post(f"{GROQ_URL}/audio/transcriptions", body, {"Content-Type": f"multipart/form-data; boundary={boundary}"})
+    return result.get("text", "").strip()
+
+
+def _tg_download(file_id: str) -> bytes:
+    path = _telegram("getFile", {"file_id": file_id})["file_path"]
+    try:
+        with urllib.request.urlopen(f"{TELEGRAM_URL}/file/bot{TELEGRAM_BOT_TOKEN}/{path}", timeout=60) as resp:
+            return resp.read()
+    except Exception as e:
+        raise RuntimeError(f"Could not download the voice note: {str(e).replace(TELEGRAM_BOT_TOKEN, '***')}") from None
+
+
+def _fn(name: str, description: str, **params) -> dict:
+    required = [k for k, (_, _, req) in params.items() if req]
+    props = {k: {"type": t, "description": d} for k, (t, d, _) in params.items()}
+    return {"type": "function", "function": {
+        "name": name, "description": description,
+        "parameters": {"type": "object", "properties": props, "required": required},
+    }}
+
+
+# What the AI may do from Telegram. Deleting/editing memories stays with /forget,
+# so a misheard voice note can never destroy data.
+AI_TOOLS = [
+    _fn("add_task", "Add something the user has to do.",
+        title=("string", "Short task title", True),
+        due=("string", "Due date YYYY-MM-DD, or empty if none", False),
+        notes=("string", "Optional extra details", False)),
+    _fn("list_tasks", "List open tasks with their #ids and due dates."),
+    _fn("complete_task", "Mark a task done. Get its #id from list_tasks first.",
+        task_id=("integer", "The task #id", True)),
+    _fn("remember", "Save a fact, decision, idea or note about the user's life.",
+        text=("string", "What to remember", True),
+        tags=("string", "Short comma-separated tags", False)),
+    _fn("recall", "Search saved memories by meaning.", query=("string", "What to look for", True)),
+    _fn("recent", "List memories saved in the last N days.", days=("integer", "Number of days", False)),
+    _fn("morning_brief", "Today's overview: overdue, today's and upcoming tasks."),
+]
+AI_FUNCS = {
+    "add_task": add_task, "list_tasks": list_tasks, "complete_task": complete_task,
+    "remember": remember, "recall": recall, "recent": recent,
+    "morning_brief": lambda: morning_brief(),
+}
+_ai_history: list[dict] = []  # last few exchanges, so "mark it done" can follow "what's due?"
+
+
+def _run_ai_tool(name: str, raw_args: str) -> str:
+    try:
+        args = json.loads(raw_args or "{}") or {}
+        return str(AI_FUNCS[name](**args))
+    except KeyError:
+        return f"Unknown tool {name}"
+    except ToolError as e:
+        return f"Error: {e}"
+    except Exception as e:
+        return f"Error: bad arguments for {name}: {e}"
+
+
+def _ask_ai(text: str) -> str:
+    today = _today()
+    system = (
+        "You are Smriti, the user's personal assistant, chatting in Telegram. "
+        f"Today is {today:%A %Y-%m-%d} ({TIMEZONE_NAME}). Use the tools to act on requests: convert dates like "
+        "'next Friday' to YYYY-MM-DD, call list_tasks to find a task's #id before completing it, and save "
+        "things worth keeping with remember. Never invent tasks or memories. Reply briefly in plain text "
+        "without markdown."
+    )
+    messages = [{"role": "system", "content": system}, *_ai_history, {"role": "user", "content": text}]
+    try:
+        _telegram("sendChatAction", {"chat_id": TELEGRAM_CHAT_ID, "action": "typing"})
+    except Exception:
+        pass
+    try:
+        for _ in range(6):
+            reply = _post(f"{GROQ_URL}/chat/completions", json.dumps({
+                "model": GROQ_CHAT_MODEL, "messages": messages, "tools": AI_TOOLS, "temperature": 0.2,
+            }).encode(), {"Content-Type": "application/json"})["choices"][0]["message"]
+            calls = reply.get("tool_calls") or []
+            if not calls:
+                answer = (reply.get("content") or "").strip() or "Done."
+                _ai_history.extend([{"role": "user", "content": text}, {"role": "assistant", "content": answer}])
+                del _ai_history[:-6]
+                return answer
+            messages.append({"role": "assistant", "content": reply.get("content") or "", "tool_calls": calls})
+            for call in calls:
+                result = _run_ai_tool(call["function"]["name"], call["function"].get("arguments", ""))
+                messages.append({"role": "tool", "tool_call_id": call["id"], "content": result})
+        return "⚠️ That took too many steps. Try rephrasing, or use a command (/help)."
+    except RuntimeError as e:
+        return f"⚠️ {e}\nCommands still work: /help"
+
+
+def _handle_voice(file_id: str) -> str:
+    if not GROQ_API_KEY:
+        return "Voice notes need GROQ_API_KEY on the server."
+    try:
+        text = _transcribe(_tg_download(file_id))
+    except RuntimeError as e:
+        return f"⚠️ {e}"
+    if not text:
+        return "🎙️ I couldn't hear anything in that voice note."
+    return f"🎙️ \u201c{text}\u201d\n\n" + _handle_bot_message(text)
 
 
 def _telegram_bot() -> None:
@@ -511,7 +651,10 @@ def _telegram_bot() -> None:
                 msg = update.get("message") or {}
                 if str(msg.get("chat", {}).get("id")) != TELEGRAM_CHAT_ID:
                     continue  # a stranger found the bot: ignore
-                if msg.get("text"):
+                voice = msg.get("voice") or msg.get("audio")
+                if voice:
+                    _send_telegram(_handle_voice(voice["file_id"]))
+                elif msg.get("text"):
                     _send_telegram(_handle_bot_message(msg["text"]))
         except Exception as e:
             log.warning("Telegram bot polling failed, retrying in 30 seconds: %s", e)
